@@ -1,0 +1,388 @@
+{
+  "project": "FundsBot",
+  "branchName": "ralph/fundsbot-v1-all-features",
+  "description": "实现 docs/prd/features 下 F01-F08 的核心能力：账本、持仓、导入、估值看板、提醒、报表、对账与系统配置，满足统一口径、可观测与可交付验收。",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "建立核心数据模型与迁移脚本（ledger/position/txn/import/report/reconcile/config）",
+      "description": "As a developer, I want a consistent schema and migration set so that all feature modules share one reliable data foundation.",
+      "acceptanceCriteria": [
+        "Create/upgrade tables for ledgers, positions, position_txn, import_batches, report_snapshot, reconcile_result, notify_rules, and config records",
+        "Enforce key constraints (ledger name unique per user, soft-delete flags, status enums, audit timestamps)",
+        "Provide rollback-safe migration scripts and seed data for local/dev",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "统一收益口径计算库（单一来源）",
+      "description": "As a product/ops stakeholder, I want one calculation library for total asset, daily estimated pnl, final pnl, and cumulative pnl so that dashboard/report/notify numbers stay consistent.",
+      "acceptanceCriteria": [
+        "Implement shared formulas and precision rules (shares 4 decimals, amount in cents int64)",
+        "Support holding/cleared/deleted position status handling",
+        "Expose reusable service methods for dashboard, reports, and reconcile jobs",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "账本创建与列表汇总接口（F01）",
+      "description": "As a multi-account user, I want to create ledgers and view per-ledger summary so that my funds are isolated and manageable.",
+      "acceptanceCriteria": [
+        "Implement POST /api/v1/ledgers with name validation (2-20 chars, unique per user)",
+        "Implement GET /api/v1/ledgers with summary fields: totalAssetCents, todayPnlCents, totalPnlCents, positionCount",
+        "Return correct business errors for duplicate/invalid inputs",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "账本上下文切换与“全部账本”聚合（F01）",
+      "description": "As a daily user, I want ledger context switching and all-ledger aggregate so that I can view isolated or global data correctly.",
+      "acceptanceCriteria": [
+        "Support ledger scope switch affecting downstream queries",
+        "Support all-ledger aggregation with consistent calculation logic",
+        "Handle empty ledgers with zero-value summaries without errors",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "持仓创建与基础校验（F02）",
+      "description": "As a portfolio maintainer, I want strict create validation for fund code, shares, and cost so that dirty data is blocked early.",
+      "acceptanceCriteria": [
+        "Implement POST /api/v1/positions with fund-exists and numeric validation",
+        "Return FND-1001 for unknown fund and FND-1002 for invalid params",
+        "Persist initial position with correct default status and invested amount",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "持仓增减仓、清仓状态与交易记录（F02）",
+      "description": "As a high-frequency trader, I want increase/decrease/edit operations with transaction history so that position cost and status stay auditable.",
+      "acceptanceCriteria": [
+        "Implement PATCH /api/v1/positions/{id} for increase/decrease/edit with weighted cost formula",
+        "Reject over-decrease with FND-1003 and support idempotency key for write operations",
+        "Auto-switch status to cleared when shares reach zero and write each operation to position_txn",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "持仓查询与软删除（F02）",
+      "description": "As a maintainer, I want readable position lists and soft delete semantics so that history remains traceable.",
+      "acceptanceCriteria": [
+        "Implement GET /api/v1/positions and DELETE /api/v1/positions/{id} as soft delete",
+        "Deleted records are excluded from default list but preserved for history/audit",
+        "Provide last-success snapshot fallback metadata for read failure scenarios",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "CSV 导入校验与部分成功提交（F03）",
+      "description": "As a new user, I want CSV import with row-level feedback and partial success so that bulk onboarding is efficient and safe.",
+      "acceptanceCriteria": [
+        "Implement /api/v1/imports/csv/validate returning row errors and summary",
+        "Implement /api/v1/imports/csv/commit to persist only validated rows and keep failed rows isolated",
+        "Store batchId and deduplicate repeated commit by validation checksum/idempotency",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "OCR 草稿识别与强制确认提交流程（F03）",
+      "description": "As an OCR user, I want low-confidence fields to require manual confirmation so that no untrusted draft enters production data.",
+      "acceptanceCriteria": [
+        "Implement /api/v1/imports/ocr/draft with confidence annotations and uncertain-field marks",
+        "Implement /api/v1/imports/ocr/confirm to reject unconfirmed drafts",
+        "Persist confirmed imports into position and position_txn with batch trace",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "行情拉取与缓存降级服务（F04/F08）",
+      "description": "As a platform service, I want robust quote fetching with retry, timeout fallback, and source health checks so that dashboard data remains available.",
+      "acceptanceCriteria": [
+        "Implement quote service for realtime/nav/basic with retry (max 2) and timeout fallback to cache",
+        "Map and expose data-source errors: token invalid, quota insufficient, api rate limited",
+        "Expose data freshness metadata (lastUpdatedAt, fresh/stale/degraded)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "首页总览与持仓排序筛选接口（F04）",
+      "description": "As a high-frequency viewer, I want one-screen overview and sortable positions so that I can quickly understand current performance.",
+      "acceptanceCriteria": [
+        "Implement GET /api/v1/dashboard/overview and GET /api/v1/positions sorting/filtering integration",
+        "Support ledger scope and all-ledger scope with unified metrics",
+        "Return delay markers and last refresh time for stale/degraded quote scenarios",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "提醒规则与净值触达任务（F05）",
+      "description": "As a risk-sensitive user, I want threshold alerts with do-not-disturb and dedup rules so that I receive useful updates without spam.",
+      "acceptanceCriteria": [
+        "Implement PUT /api/v1/notify/rules and nav daily-summary access",
+        "Implement trigger pipeline after nav finalization with daily dedup (same category max once/day)",
+        "Respect do-not-disturb windows (external push suppressed, in-app fallback kept)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "提醒重试、保底通道与点击追踪（F05）",
+      "description": "As an ops owner, I want reliable delivery with retries/fallback and click tracking so that notification SLA is measurable.",
+      "acceptanceCriteria": [
+        "Implement retry policy (3 exponential retries) for external push failures",
+        "Fallback to in-app message when external delivery fails",
+        "Emit notify trigger/click metrics and latency measurement",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "周报/月报快照生成与读取（F06）",
+      "description": "As a review user, I want immutable weekly/monthly report snapshots so that longitudinal analysis is stable and comparable.",
+      "acceptanceCriteria": [
+        "Implement weekly/monthly snapshot generation jobs with versioning",
+        "Implement read APIs for report snapshots by period and ledger",
+        "Ensure snapshots are immutable and re-calc keeps version history",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "报表分享导出与异常回退（F06）",
+      "description": "As a report user, I want report sharing output and resilient fallback to latest snapshot so that reports are always accessible.",
+      "acceptanceCriteria": [
+        "Implement report share export output (long image or equivalent artifact)",
+        "On read/generate failure, return latest available snapshot with timestamp/degraded marker",
+        "Keep period and ledger comparability fields consistent",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "日对账任务、误差阈值与告警（F07）",
+      "description": "As a quality owner, I want daily reconcile automation with threshold checks and fast alerts so that metric trust is protected.",
+      "acceptanceCriteria": [
+        "Implement daily reconcile run using shared calculation library and fixed sample sets",
+        "Mark pass/warn/fail by <=0.1% error threshold and missing-data conditions",
+        "Trigger alerts within 5 minutes for fail/warn policy breaches",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "按日期重算机制与版本留痕（F07）",
+      "description": "As an operator, I want date-based recalculation with retained versions so that reconciliation issues can be corrected without losing history.",
+      "acceptanceCriteria": [
+        "Implement recalculate jobs by date range with non-destructive versioned results",
+        "Link reconcile records to source dataset/version and execution logs",
+        "Expose latest passed version for runtime fallback",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "系统配置中心与环境切换（F08）",
+      "description": "As an admin, I want test/prod data-source config switching and rollback controls so that operations are safe and controlled.",
+      "acceptanceCriteria": [
+        "Implement config validation and environment switch (test/prod) with health checks",
+        "Ensure token is loaded from environment/secret manager only, never committed to repo or persisted as plaintext",
+        "Support rollback flow for invalid config/performance regression",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "可观测性与告警基线（F01-F08）",
+      "description": "As an ops engineer, I want unified metrics/logging/tracing across core flows so that reliability targets can be monitored and incidents can be diagnosed quickly.",
+      "acceptanceCriteria": [
+        "Add event metrics for create/switch/import/refresh/notify/report/reconcile/config actions",
+        "Attach requestId traceability for key errors and include structured logs",
+        "Define and wire alert thresholds for success rates, latency P95, and failure spikes",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "账本与持仓管理前端页面（F01/F02）",
+      "description": "As an end user, I want usable ledger/position UI flows so that I can create ledgers, switch scope, and perform position operations with clear feedback.",
+      "acceptanceCriteria": [
+        "Implement ledger page (create modal, list summary, switcher including all-ledger)",
+        "Implement position list and increase/decrease/delete interactions with field-level validation messages",
+        "Real browser verification passes (Playwright/OpenClaw browser)",
+        "Evidence captured (screenshots/logs)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "导入与OCR确认前端页面（F03）",
+      "description": "As a user onboarding positions, I want csv upload feedback and ocr confirmation UI so that I can import quickly with confidence.",
+      "acceptanceCriteria": [
+        "Implement CSV upload/validate/commit flow with row-level error rendering",
+        "Implement OCR draft review page with mandatory confirmation of low-confidence fields",
+        "Real browser verification passes (Playwright/OpenClaw browser)",
+        "Evidence captured (screenshots/logs)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "首页总览与延迟提示前端（F04）",
+      "description": "As a daily active user, I want fast dashboard rendering with freshness indicators so that I can trust what I see during trading and off-hours.",
+      "acceptanceCriteria": [
+        "Implement overview cards, position sorting/filtering, and ledger scope switch",
+        "Show stale/degraded status with last update timestamp and fallback messaging",
+        "Real browser verification passes (Playwright/OpenClaw browser)",
+        "Evidence captured (screenshots/logs)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "提醒规则与当日总结入口前端（F05）",
+      "description": "As a notification user, I want to configure threshold and do-not-disturb and navigate to daily summary from reminders.",
+      "acceptanceCriteria": [
+        "Implement notification settings UI (thresholds, schedule, do-not-disturb)",
+        "Support reminder deep-link entry to daily summary view",
+        "Real browser verification passes (Playwright/OpenClaw browser)",
+        "Evidence captured (screenshots/logs)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "周报/月报与分享前端（F06）",
+      "description": "As a review user, I want weekly/monthly report views with ledger comparison and share action so that I can analyze and communicate performance.",
+      "acceptanceCriteria": [
+        "Implement report pages for weekly/monthly snapshots and ledger switch comparison",
+        "Implement share action and degraded fallback rendering",
+        "Real browser verification passes (Playwright/OpenClaw browser)",
+        "Evidence captured (screenshots/logs)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "系统设置与健康检查前端（F08）",
+      "description": "As an admin/operator, I want a settings panel for datasource mode and health status so that environment and risk posture are visible and controllable.",
+      "acceptanceCriteria": [
+        "Implement settings page for env mode, timezone, notify and datasource health visibility",
+        "Prevent plaintext token display/storage in UI and logs",
+        "Real browser verification passes (Playwright/OpenClaw browser)",
+        "Evidence captured (screenshots/logs)",
+        "Tests pass",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
