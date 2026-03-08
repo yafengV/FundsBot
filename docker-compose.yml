@@ -1,0 +1,8 @@
+services:
+  fundsbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fundsbot-local
+    working_dir: /app
+    command: npm run check
