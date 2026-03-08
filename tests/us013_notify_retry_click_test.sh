@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+node "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tests/us013_notify_retry_click_test.js"

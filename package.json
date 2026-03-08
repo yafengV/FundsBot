@@ -1,0 +1,11 @@
+{
+  "name": "fundsbot",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "lint": "bash scripts/lint.sh",
+    "typecheck": "bash scripts/typecheck.sh",
+    "test": "bash tests/us001_migration_test.sh && bash tests/us002_calculation_test.sh && bash tests/us003_ledgers_test.sh && bash tests/us004_ledger_scope_test.sh && bash tests/us005_positions_create_test.sh && bash tests/us006_positions_update_test.sh && bash tests/us007_positions_query_delete_test.sh && bash tests/us008_import_csv_test.sh && bash tests/us009_import_ocr_test.sh && bash tests/us010_quote_service_test.sh && bash tests/us011_dashboard_overview_test.sh && bash tests/us012_notify_rules_test.sh && bash tests/us013_notify_retry_click_test.sh && bash tests/us014_report_snapshot_test.sh && bash tests/us015_report_share_fallback_test.sh && bash tests/us016_reconcile_task_test.sh && bash tests/us017_reconcile_recalculate_test.sh && bash tests/us018_config_service_test.sh && bash tests/us019_observability_baseline_test.sh && bash tests/us020_frontend_ledger_position_test.sh && bash tests/us021_frontend_import_ocr_test.sh && bash tests/us022_frontend_dashboard_delay_test.sh && bash tests/us023_frontend_notify_summary_test.sh && bash tests/us024_frontend_report_share_test.sh && bash tests/us025_frontend_settings_health_test.sh",
+    "check": "npm run lint && npm run typecheck && npm run test"
+  }
+}

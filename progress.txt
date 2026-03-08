@@ -1,0 +1,361 @@
+## Codebase Patterns
+- Settings frontend flows should allowlist datasource form fields (`env`, `reason`, `targetVersion`) before calling config services so plaintext token fields are dropped at the page-model boundary.
+- Reminder-driven frontend navigation should resolve `deepLink` query params first and fallback to structured reminder payload fields before calling `getNavDailySummary`, so notification entry behavior stays consistent with backend summary routing.
+- Database changes should ship with paired `*.up.sql` and `*.down.sql` files to keep rollbacks deterministic.
+- Validate migration behavior with an actual SQLite apply/rollback test instead of only checking file existence.
+- macOS default Bash is 3.2 in this environment, so avoid associative arrays in shared shell scripts.
+- Shared finance metrics must use `shares_x10000` + NAV(4dp) -> cents via rounded integer math to keep dashboard/report/reconcile outputs consistent.
+- Ledger list summaries should include only `holding` positions; `cleared` positions remain historical records but are excluded from F01 summary totals.
+- For ledger-scoped reads, normalize with `switchLedgerScope` first and then reuse `getScopedPositions` plus `getScopeSummary` to keep single-ledger/all-ledger semantics aligned.
+- Position write APIs should parse decimal `shares`/`costNav` into 4dp scaled integers (`*_x10000`) and derive `invested_cents` via rounded integer math.
+- Position mutation flows should apply idempotency before any write and dedupe by `(position_id, idempotency_key)` to keep retries side-effect free.
+- Read-side fallback should return a stable `{ items, meta }` shape with `meta.isFallback` and `meta.lastSuccessAt` so UI can degrade without changing render logic.
+- CSV import should persist normalized `validated_rows` with batch metadata so commit can support partial success and deterministic checksum dedupe.
+- OCR draft flows should persist per-row `uncertainFields` and require explicit `confirmedFields` coverage before confirm can write positions/txns.
+- Quote fetch flows should retry retriable upstream failures up to 2 times, then fallback to cached values and surface per-type freshness (`fresh/stale/degraded`) metadata.
+- Dashboard/position read responses should derive delay markers from the worst freshness in-scope (`degraded` > `stale` > `fresh`) and expose the latest `lastUpdatedAt` timestamp for UI hints.
+- Notification trigger flows should dedupe by `(user_id, category, date)` before dispatch and downgrade external channels to `in_app` during do-not-disturb windows.
+- External notification delivery should record per-attempt retry metadata (attempt index/backoff/status) so fallback and SLA metrics can be computed from persisted trigger logs.
+- Report snapshots should be append-only per `(user, scope, period)` with monotonically increasing `version`; recalc writes a new version and read defaults to latest.
+- Report fallback responses should only downgrade to the latest snapshot within the same `period_type + ledger scope` and include explicit fallback metadata (`reason`, requested period key, fallback timestamp).
+- Reconcile tasks should compare only the fixed metric set (`totalAssetCents`, `dailyEstimatedPnlCents`, `dailyFinalPnlCents`, `cumulativePnlCents`) against expected sample baselines and classify by bps thresholds (`pass <= 10`, `warn <= 50`, else `fail`) with alert SLA tracking.
+- Reconcile recalculation should append new `version` rows per `(run_date, ledger_scope, ledger_id)` and mark runtime fallback via `getLatestPassedReconcileVersion` instead of mutating historical rows.
+- Datasource config switching should load tokens only via secret/env providers (`getSecret` or `process.env`) and persist only env/masked metadata, never plaintext tokens.
+- Cross-module observability should wrap exported service handlers via `withObservedAction` so request IDs, structured logs, action metrics, trace spans, and threshold alerts stay consistent without duplicating instrumentation logic.
+- Frontend feature delivery in this repo should encapsulate UI behavior as a pure page model + HTML renderer module so interaction flows can be validated in Node tests without introducing framework/runtime coupling.
+- Import frontend flows should persist latest validation/draft batch context in page-model state so commit/confirm actions can default to the most recent batch without extra UI wiring.
+- Frontend page-model query updates should be staged and rolled back on downstream service validation errors so error views render without poisoning state with invalid filters/sort/scope values.
+- Report frontend flows should drive read and share actions from the same normalized query state (`periodType/scope/ledgerId/periodKey`) so exported artifacts match the currently viewed snapshot and fallback context.
+
+## [2026-03-08 18:53:30 CST] - US-001
+- Implemented core SQLite schema migrations for ledgers, positions, position_txn, import_batches, report_snapshot, reconcile_result, notify_rules, and config_records with enum checks, soft-delete flags, audit timestamps, and key indexes/constraints.
+- Added rollback-safe down migration and local/dev seed up/down scripts.
+- Added reproducible quality checks (`lint`, `typecheck`, `test`) and a behavioral migration test that validates constraints and rollback.
+- Files changed: `db/migrations/001_core_schema.up.sql`, `db/migrations/001_core_schema.down.sql`, `db/seeds/001_dev_seed.up.sql`, `db/seeds/001_dev_seed.down.sql`, `scripts/lint.sh`, `scripts/typecheck.sh`, `tests/us001_migration_test.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Use SQLite-first schema validation in shell scripts so checks run without external package installs.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Keep shell scripts Bash-3.2 compatible for local execution.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - `scripts/ralph/prd.json` is the active execution PRD path for Ralph iterations in this repo.
+---
+## [2026-03-08 18:57:11 CST] - US-002
+- Implemented a shared calculation library (`src/calculation/metrics.js`) as a single source for total asset, daily estimated pnl, daily final pnl, and cumulative pnl.
+- Added centralized status handling (`holding`/`cleared`/`deleted`) and reusable service methods for dashboard summary, report summary, and reconcile metric output.
+- Added US-002 automated tests plus quality-gate integration so `lint`, `typecheck`, and `test` all validate the new metric library behavior.
+- Files changed: `src/calculation/metrics.js`, `tests/us002_calculation_test.js`, `tests/us002_calculation_test.sh`, `scripts/lint.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Keep all aggregate surfaces (dashboard/report/reconcile) calling one shared `aggregatePortfolio` path to avoid metric drift.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - JS lint/type checks here are lightweight shell-driven checks (`node --check` + export assertions), so add explicit runtime tests for formula correctness.
+  - Useful context (e.g., "the evaluation panel is in component X")
+- `status=deleted` is fully excluded from aggregates, while `status=cleared` keeps historical realized/invested contribution but no market-value/day-pnl contribution.
+---
+## [2026-03-08 19:01:00 CST] - US-003
+- Implemented ledger service APIs for create/list behavior in `src/ledger/service.js`, covering `POST /api/v1/ledgers` and `GET /api/v1/ledgers` contract behavior for validation, duplicate checks, and summary output fields.
+- Reused shared metric logic for summary computations while enforcing F01 rule to aggregate only `holding` positions; empty ledgers return zero-value summaries.
+- Added automated US-003 tests and integrated them into the quality gate.
+- Files changed: `src/ledger/service.js`, `tests/us003_ledgers_test.js`, `tests/us003_ledgers_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - API-like backend stories in this repo are currently implemented as pure service modules plus Node assert tests, then wired through shell test runners.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - If you reuse `aggregatePortfolio` for ledger-level F01 summaries, filter inputs to `status=holding` first to match the product data-caliber rule.
+  - Useful context (e.g., "the evaluation panel is in component X")
+- Update both `package.json` test chain and `scripts/typecheck.sh` export assertions when adding a new service module.
+---
+## [2026-03-08 19:04:13 CST] - US-004
+- Implemented ledger-context switch primitives in `src/ledger/service.js` with explicit scope validation for `all` and per-ledger scope, including business-error handling for unknown scopes.
+- Added downstream scope filtering helper and all-ledger summary aggregation that reuses shared metric logic and preserves empty-ledger zero summaries.
+- Added US-004 automated tests and quality-gate wiring for new service exports and scope behavior assertions.
+- Files changed: `src/ledger/service.js`, `tests/us004_ledger_scope_test.js`, `tests/us004_ledger_scope_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Treat scope parsing as its own reusable step (`switchLedgerScope`) so every downstream query uses one validated context object.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - For all-ledger totals, filter positions by user-owned ledgers before aggregation to avoid cross-user leakage in in-memory service paths.
+- Useful context (e.g., "the evaluation panel is in component X")
+  - Add new service exports to `scripts/typecheck.sh` and include story-specific shell runners in `package.json` `test` chain.
+---
+## [2026-03-08 19:07:25 CST] - US-005
+- Implemented `POST /api/v1/positions` service logic in `src/position/service.js` with user-ledger validation, fund existence checks, decimal parameter validation, and default `holding` persistence fields.
+- Added precise conversion from decimal `shares`/`costNav` into `shares_x10000`, `avg_cost_cents`, and `invested_cents`, including precision guardrails and error mapping to `FND-1001`/`FND-1002`.
+- Added US-005 automated tests and quality-gate wiring for new service exports and test runner.
+- Files changed: `src/position/service.js`, `tests/us005_positions_create_test.js`, `tests/us005_positions_create_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - New domain modules should expose pure functions with dependency-injected `now`/`idGenerator` so tests stay deterministic without DB/network access.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - When adding a new story module, update both `scripts/typecheck.sh` export assertions and `package.json` test chain or checks will miss the new surface.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - F02 create flow expects `fundCatalog` data injection (array/object supported) for fund existence checks, rather than hardcoding fund metadata in service logic.
+---
+## [2026-03-08 19:11:49 CST] - US-006
+- Implemented `PATCH /api/v1/positions/{id}` mutation service via `updatePosition` in-memory domain logic for `increase/decrease/edit`, including weighted-cost recompute, over-decrease rejection with `FND-1003`, and auto-switch to `cleared` when shares reach zero.
+- Added position transaction journaling for every write operation into `positionTxns` with idempotency key support and `clear` transaction typing when a decrease fully closes a position.
+- Added US-006 tests covering increase, idempotent replay, partial decrease, full clear, edit correction, and authorization/business-rule failures.
+- Files changed: `src/position/service.js`, `tests/us006_positions_update_test.js`, `tests/us006_positions_update_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Position write stories should keep transaction logs as explicit append-only records with signed deltas (`shares_delta_x10000`, `amount_delta_cents`) so audit trails can be reconstructed deterministically.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Deterministic tests that inject `now()` may consume timestamps multiple times per mutation (position update + txn record), so assert expected call order carefully.
+- Useful context (e.g., "the evaluation panel is in component X")
+  - Replayed writes with the same idempotency key return current position state with `idempotent: true` and should not append a second txn record.
+---
+## [2026-03-08 19:16:36 CST] - US-007
+- Implemented `GET /api/v1/positions` domain read via `listPositions`, including user-ledger scoping, optional `ledgerId` filtering, and exclusion of soft-deleted records from default results.
+- Implemented `DELETE /api/v1/positions/{id}` soft-delete behavior via `deletePosition`, setting `status=deleted`, `is_deleted=1`, and delete/update timestamps while preserving historical records.
+- Added read-failure fallback metadata support (`meta.isFallback`, `meta.lastSuccessAt`, `meta.reason`) that serves the last-success snapshot payload when reads fail.
+- Added US-007 tests and wired quality-gate exports/test chain updates.
+- Files changed: `src/position/service.js`, `tests/us007_positions_query_delete_test.js`, `tests/us007_positions_query_delete_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Keep position read responses wrapped in `{ items, meta }` so fallback snapshots and normal reads share one contract.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Soft delete in this codebase should set both `status='deleted'` and `is_deleted=1`; list queries must filter both to avoid accidental resurfacing.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Adding service functions still requires updating both `scripts/typecheck.sh` export assertions and `package.json` test pipeline.
+---
+## [2026-03-08 19:20:53 CST] - US-008
+- Implemented CSV import service in `src/import/service.js` with `validateCsvImport` and `commitCsvImport`, including row-level validation results, summary output, and batch persistence metadata.
+- Added partial-success commit behavior that persists only validated rows into positions while retaining failed rows in batch error payload/state (`partial_failed` vs `committed`).
+- Implemented commit deduplication via both idempotency replay and validation-checksum duplicate detection across batches.
+- Added US-008 automated tests and wired quality-gate exports/test chain updates.
+- Files changed: `src/import/service.js`, `tests/us008_import_csv_test.js`, `tests/us008_import_csv_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Import flows here should materialize normalized valid rows during validation so commit stays deterministic and does not re-parse raw CSV payloads.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Commit dedupe should check `validation_checksum` before writes to avoid duplicate position creation across repeated uploads.
+  - Useful context (e.g., "the evaluation panel is in component X")
+- Add new service modules to both `scripts/typecheck.sh` export assertions and `package.json` test chain, or CI checks will miss them.
+---
+## [2026-03-08 19:25:17 CST] - US-009
+- Implemented OCR import service support in `src/import/service.js` with `createOcrDraft` and `confirmOcrDraft`, including per-field confidence annotations, low-confidence uncertain-field marks, and confirmation gating.
+- Added OCR confirm commit flow that persists positions and appends `position_txn` create records with `import_batch_id` trace metadata.
+- Added idempotency and checksum dedupe behavior for OCR confirm path, consistent with existing CSV batch commit protections.
+- Files changed: `src/import/service.js`, `tests/us009_import_ocr_test.js`, `tests/us009_import_ocr_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - OCR should stay two-phase (`draft` then `confirm`): store confidence+uncertain metadata during draft and block confirm until every uncertain field is explicitly acknowledged.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - `position_txn` audit completeness for import flows requires writing explicit `create` txns during batch confirm, not only creating `positions`.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - For import story additions, keep the same quality gate pattern by updating both `scripts/typecheck.sh` export checks and `package.json` test chain.
+---
+## [2026-03-08 19:29:02 CST] - US-010
+- Implemented quote fetching service in `src/quote/service.js` with support for `realtime`/`nav`/`basic`, retry policy (max 2 retries), per-call timeout handling, and automatic fallback to cached quotes.
+- Added normalized data-source error mapping for token invalid, quota insufficient, and api rate limited, including stable service error codes and reasons.
+- Exposed freshness metadata (`lastUpdatedAt`, `fresh/stale/degraded`) at both aggregate and per-quote-type levels, and persisted successful remote responses into cache.
+- Added US-010 tests and quality-gate wiring in typecheck/test pipelines.
+- Files changed: `src/quote/service.js`, `tests/us010_quote_service_test.js`, `tests/us010_quote_service_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Quote services in this codebase should expose a stable `meta.byType` structure (`source`, `attempts`, `lastUpdatedAt`, `freshness`) so downstream dashboard surfaces can render degradation details consistently.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Any new domain service must be added to both `scripts/typecheck.sh` export assertions and `package.json` test chain, or CI-style checks will not cover the story.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Timeout-induced fallback currently maps to generic upstream-unavailable reason while still serving cache; consumers should use `meta.byType[*].source` to detect degraded cache reads.
+---
+## [2026-03-08 19:34:38 CST] - US-011
+- Implemented dashboard overview service (`getDashboardOverview`) in `src/dashboard/service.js`, supporting ledger scope/all-ledger scope aggregation with unified metric logic and delay marker fields (`quoteStatus`, `isDelayed`, `lastQuoteAt`, `delayMessage`).
+- Extended `listPositions` in `src/position/service.js` with F04 sorting/filtering support (`platform`, `status`, `sortBy`, `order`) and per-item market fields (`todayPnlCents`, `totalPnlCents`, `changeRateBp`), plus quote freshness metadata under `meta.quote`.
+- Added US-011 automated tests and wired quality checks to include the new dashboard module and test runner.
+- Files changed: `src/dashboard/service.js`, `src/position/service.js`, `tests/us011_dashboard_overview_test.js`, `tests/us011_dashboard_overview_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - For delay hints, compute a scope-level freshness rollup from per-position quote metadata and expose a single UI-friendly marker object in read APIs.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Position list freshness can change after filters are applied; derive `meta.quote` from the filtered result set rather than all user positions.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Dashboard overview currently treats only `holding` positions as in-scope for asset/pnl totals, consistent with existing F01/F04 aggregation behavior.
+---
+## [2026-03-08 19:40:31 CST] - US-012
+- Implemented notify domain service in `src/notify/service.js` for `PUT /api/v1/notify/rules`, including validation, ledger-scope normalization, upsert behavior, and rule-update event metadata.
+- Implemented `GET /api/v1/nav/daily-summary` access via `getNavDailySummary`, with scope/date lookup, deep-link output for daily summary navigation, and `FND-2002` when NAV summary data is missing.
+- Implemented post-NAV-finalization trigger pipeline (`triggerNavFinalizedNotifications`) with category-based condition checks, once-per-day dedupe by category, and do-not-disturb channel downgrade (external push suppressed, in-app fallback retained).
+- Added US-012 automated tests and integrated the new module into project quality gates.
+- Files changed: `src/notify/service.js`, `tests/us012_notify_rules_test.js`, `tests/us012_notify_rules_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - For notify workflows, model trigger dedupe as `(user_id, category, date)` before channel routing so retries/re-runs remain side-effect free.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Do-not-disturb handling should only suppress external push paths; keep in-app notification delivery as the mandatory fallback for reminder visibility.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Keep notify module coverage in both `scripts/typecheck.sh` export checks and `package.json` test pipeline so new stories are exercised by `npm run check`.
+---
+## [2026-03-08 19:44:25 CST] - US-013
+- Implemented notify delivery hardening in `src/notify/service.js`: external push now retries with exponential backoff metadata (3 retries after initial attempt), then falls back to `in_app` when all external attempts fail.
+- Added trigger-time observability fields and metric rollups (`triggerCount`, external attempts/failures, fallback count, average trigger/external latency), and introduced click tracking via `trackNotifyClick` with click-latency measurement.
+- Added US-013 automated coverage for retry/fallback behavior, trigger metrics, click metric emission, and click idempotency.
+- Files changed: `src/notify/service.js`, `tests/us013_notify_retry_click_test.js`, `tests/us013_notify_retry_click_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Notify delivery robustness here is modeled as data-first domain logic: persist each attempt outcome, then derive fallback and SLA metrics from the same trigger record.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Any new notify API surface should be added to `scripts/typecheck.sh` export assertions and a story shell runner in `package.json` `test` chain, or it will be missed by `npm run check`.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - `trackNotifyClick` expects the original trigger record in `notifyTriggers`; click latency is computed from trigger `created_at` to click timestamp.
+---
+## [2026-03-08 19:50:31 CST] - US-014
+- Implemented report snapshot service in `src/report/service.js` with weekly/monthly generation jobs (`generateWeeklySnapshot`, `generateMonthlySnapshot`) using immutable append-only records and per-scope period version increments.
+- Implemented report read APIs (`getWeeklyReport`, `getMonthlyReport`) with scope validation, period parsing (`YYYY-Www`, `YYYY-MM`), latest-version default reads, and explicit-version lookups.
+- Added US-014 automated tests covering weekly/monthly generation, version history retention, immutability, ledger-scope filtering, and missing/invalid period handling.
+- Files changed: `src/report/service.js`, `tests/us014_report_snapshot_test.js`, `tests/us014_report_snapshot_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Report generation should reuse shared `getReportSummary` metrics to keep report figures aligned with dashboard/reconcile math.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - `report_snapshot` schema lacks `user_id`, so in-memory domain flows must still carry user ownership metadata to avoid cross-user collisions for all-ledger snapshots.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Weekly reads/generation in this repo use ISO week keys (`YYYY-Www`) normalized to Monday-Sunday period bounds.
+---
+## [2026-03-08 19:56:09 CST] - US-015
+- Implemented report resilience and share-export support in `src/report/service.js`: weekly/monthly read and generation paths now fallback to the latest comparable snapshot on non-validation failures and mark responses as degraded with explicit fallback metadata.
+- Added share export APIs (`exportReportShare`, `shareWeeklyReport`, `shareMonthlyReport`) that emit a stable long-image-equivalent payload with period/scope/version comparability fields and snapshot metric cards.
+- Added US-015 automated tests plus quality-gate wiring for new exports and test runner.
+- Files changed: `src/report/service.js`, `tests/us015_report_share_fallback_test.js`, `tests/us015_report_share_fallback_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - For report resilience, fallback should stay within the same period type and ledger scope to preserve cross-period comparability and avoid cross-ledger leakage.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Keep `INVALID_PARAMS` as hard errors (no fallback) so malformed requests do not silently degrade to stale snapshots.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Share outputs here are modeled as deterministic payload artifacts (`long_image_payload`) that embed snapshot identifiers and summary cards, not binary files.
+---
+## [2026-03-08 20:01:22 CST] - US-016
+- Implemented daily reconcile service in `src/reconcile/service.js` with scope validation, fixed-metric baseline comparison, status classification (`pass`/`warn`/`fail`/`missing_data`), and persisted reconcile-result records.
+- Added alert generation for warn/fail policy breaches with 5-minute SLA metadata (`deadlineAt`, `dispatchedAt`, `latencyMs`, `withinSla`) and run-level observability metrics.
+- Added US-016 automated tests and wired project quality checks to include the new reconcile module and test runner.
+- Files changed: `src/reconcile/service.js`, `tests/us016_reconcile_task_test.js`, `tests/us016_reconcile_task_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Reconcile should reuse `getReconcileMetrics` from the shared calculation library and compare against expected sample datasets by `metricName` rather than re-implementing formulas.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - `missing_data` can be story-significant even with integer-only persistence columns, so carry root-cause context in `details_json` and keep `actual_cents` as deterministic fallback values.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - For new domain modules, update both `scripts/typecheck.sh` export assertions and `package.json` test chain, otherwise `npm run check` coverage is incomplete.
+---
+## [2026-03-08 20:06:58 CST] - US-017
+- Implemented reconcile recalculation support in `src/reconcile/service.js` with date-range execution (`recalculateReconcileRange`) that re-runs reconcile jobs per day and persists append-only versioned results.
+- Added per-record versioning and recalculation trace metadata (`run_type`, `execution_id`, `source_dataset_version`, `execution_log_json`) so reconcile rows link to source dataset/version and execution logs without overwriting prior runs.
+- Added runtime fallback helper `getLatestPassedReconcileVersion` to resolve the newest fully-passed reconcile version for a target date/scope.
+- Added automated US-017 coverage and quality-gate wiring.
+- Files changed: `src/reconcile/service.js`, `tests/us017_reconcile_recalculate_test.js`, `tests/us017_reconcile_recalculate_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Reconcile re-runs should be append-only by `version` under `(run_date, ledger_scope, ledger_id)` so historical anomaly trails remain auditable.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - When introducing a new service API in this repo, update both `scripts/typecheck.sh` export assertions and `package.json` test chain, or `npm run check` will miss it.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - `getLatestPassedReconcileVersion` expects all fixed metrics to be `pass` for a version before it is eligible as runtime fallback.
+---
+## [2026-03-08 20:12:42 CST] - US-018
+- Implemented config center service in `src/config/service.js` with datasource env validation/switch (`test`/`prod`), health-check-gated activation, versioned config records, and deterministic event metadata (`config_update`, `datasource_switch`).
+- Added rollback flow (`rollbackDatasourceEnv`) that revalidates target env health and appends a new active version instead of mutating history, plus active-config reader (`getActiveDatasourceConfig`) for safe runtime inspection.
+- Enforced token security rules: inline token payloads are rejected; tokens are loaded from secret/env providers only and are never persisted as plaintext in config records.
+- Added US-018 automated tests and quality-gate wiring for new exports/test runner.
+- Files changed: `src/config/service.js`, `tests/us018_config_service_test.js`, `tests/us018_config_service_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Config switch logic should run datasource health checks before activating env changes and append new versions for both switch and rollback operations.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Keep token handling strictly externalized (`getSecret`/environment); reject request-body token fields to prevent accidental plaintext persistence.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Add each new module to both `scripts/typecheck.sh` export assertions and `package.json` test chain so `npm run check` exercises it.
+---
+## [2026-03-08 20:19:33 CST] - US-019
+- Implemented shared observability baseline in `src/observability/service.js` to emit action metrics, structured logs, trace spans, and threshold-based alerts (success-rate, latency P95, failure-spike) with requestId propagation.
+- Instrumented core action entrypoints across ledger/import/quote/notify/report/reconcile/config services using non-breaking export wrappers around existing handlers.
+- Added US-019 automated tests validating action coverage, requestId error traceability, structured logs/traces, and alert threshold behavior; wired the new module/test into quality gates.
+- Files changed: `src/observability/service.js`, `src/ledger/service.js`, `src/import/service.js`, `src/quote/service.js`, `src/notify/service.js`, `src/report/service.js`, `src/reconcile/service.js`, `src/config/service.js`, `tests/us019_observability_baseline_test.js`, `tests/us019_observability_baseline_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Keep cross-cutting telemetry centralized via a wrapper utility (`withObservedAction`) and apply it at service export boundaries to avoid business-logic churn.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Alert checks depend on per-action history window size; tests should feed enough samples or tune `observabilityThresholds` for deterministic assertions.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - Request ID extraction currently supports direct input, `x-request-id` header, and body/query fields, then auto-generates a fallback ID.
+---
+## [2026-03-08 20:24:15 CST] - US-020
+- Implemented frontend ledger/position page module in `src/frontend/portfolio_page.js` with UI-state modeling for create-ledger modal, ledger scope switching (`all` + single ledger), position create/update/delete interactions, and field-level validation message mapping from service errors.
+- Added HTML renderer for the page view model so ledger summaries, scope totals, and position table output are generated from a deterministic contract.
+- Added US-020 automated checks to verify modal visibility, ledger creation validation/success path, all-ledger switch behavior, position operation flows (increase/decrease/delete), and rendered output.
+- Wired US-020 into quality gates (`typecheck` export assertions + `test` chain) and re-ran full `npm run check` successfully.
+- Files changed: `src/frontend/portfolio_page.js`, `tests/us020_frontend_ledger_position_test.js`, `tests/us020_frontend_ledger_position_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Frontend stories can stay deterministic by wrapping existing domain services behind a page-model adapter that returns `{ ok, view, error }` for each interaction.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - `updatePosition` and `deletePosition` expect `positionId` at top-level input (not inside `body`), so UI adapters must map form payloads accordingly.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - This environment does not currently expose the `dev-browser` skill, so browser-only validation must be flagged explicitly when handing off frontend stories.
+---
+## [2026-03-08 20:28:24 CST] - US-021
+- Implemented import frontend page model in `src/frontend/import_page.js` with CSV validate/commit interactions and OCR draft/confirm interactions, including per-action `{ ok, data/error, view }` response shape and field-level error mapping.
+- Added HTML renderer for CSV row-level validation results and OCR low-confidence confirmation state so UI can display invalid rows, uncertain fields, and confirm outcomes from deterministic view data.
+- Added US-021 automated tests and shell runner covering CSV partial-success flow, OCR mandatory confirmation gating, confirmed re-draft path, and final confirm persistence effects.
+- Files changed: `src/frontend/import_page.js`, `tests/us021_frontend_import_ocr_test.js`, `tests/us021_frontend_import_ocr_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Frontend import interactions should keep latest validation/draft payloads in page-model state and let commit/confirm default to that batch ID to simplify UI form payloads.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - OCR confirm reads persisted draft confirmation flags from the selected batch; if user confirms low-confidence fields in UI, regenerate the draft with updated `confirmedFields` before calling confirm.
+  - Useful context (e.g., "the evaluation panel is in component X")
+- The `dev-browser` skill is not available in this session, so browser verification for frontend stories remains blocked and should be completed when browser tooling is provided.
+---
+## [2026-03-08 20:33:26 CST] - US-022
+- Implemented dashboard frontend page model and renderer in `src/frontend/dashboard_page.js`, covering ledger scope switching, position filter/sort controls, overview card composition, and stale/degraded delay hint rendering with last update timestamp.
+- Added robust query-state handling so invalid scope/filter/sort inputs surface field errors while restoring the previous valid query state.
+- Added US-022 automated coverage and shell runner, then wired the story into quality gates (`scripts/typecheck.sh` export assertions and `package.json` test chain).
+- Files changed: `src/frontend/dashboard_page.js`, `tests/us022_frontend_dashboard_delay_test.js`, `tests/us022_frontend_dashboard_delay_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Dashboard frontend should source overview metrics from `getDashboardOverview` and table rows from `listPositions` using the same scope/filter/sort query contract to keep cards/table consistent.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Do not persist invalid query mutations before view recomputation; rollback to the prior query on service validation failures so error rendering can succeed deterministically.
+  - Useful context (e.g., "the evaluation panel is in component X")
+- The `dev-browser` skill is still unavailable in this session, so browser verification evidence for frontend stories remains blocked and should be completed when browser tooling is provided.
+---
+## [2026-03-08 20:37:31 CST] - US-023
+- Implemented notification frontend page model in `src/frontend/notify_page.js`, covering rule settings submission (threshold + do-not-disturb + channel), daily summary open flow, and reminder-entry deep-link navigation.
+- Added deterministic HTML renderer for settings, summary, and reminder-entry sections, including field-level error slots for invalid setting and summary query inputs.
+- Added US-023 automated tests and shell runner, then integrated the new frontend module/story into quality gates (`scripts/typecheck.sh` export assertions + `package.json` test chain). `npm run check` passes.
+- Files changed: `src/frontend/notify_page.js`, `tests/us023_frontend_notify_summary_test.js`, `tests/us023_frontend_notify_summary_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Reminder entry should parse an existing deep-link first, then fallback to structured payload fields (`date/scope/ledgerId`) so frontend navigation stays aligned with notify payload contracts.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Frontend story modules must still be added to both `scripts/typecheck.sh` export assertions and `package.json` `test` chain, or `npm run check` will not cover them.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - The `dev-browser` skill is not available in this session, so browser verification for this frontend story is blocked and should be executed once browser tooling is available.
+---
+## [2026-03-08 20:42:11 CST] - US-024
+- Implemented report frontend page model in `src/frontend/report_page.js`, including weekly/monthly snapshot read actions, ledger-scope comparison switching (`all`/`single`), and share export actions wired to report service contracts.
+- Added deterministic report renderer for query state, snapshot cards, degraded/fallback metadata, ledger comparison options, and share artifact output.
+- Added US-024 automated tests and shell runner covering weekly/monthly view flows, ledger comparison switching, degraded fallback rendering, share action output, and comparison validation errors.
+- Files changed: `src/frontend/report_page.js`, `tests/us024_frontend_report_share_test.js`, `tests/us024_frontend_report_share_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Keep report read/share operations keyed off one normalized query state (`periodType/scope/ledgerId/period`) so UI snapshot and exported payload stay consistent under fallback.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - Report service `scope='single'` always requires `ledgerId`; page-model comparison switches should validate this before triggering report fetch.
+  - Useful context (e.g., "the evaluation panel is in component X")
+- The `dev-browser` skill is unavailable in this session, so browser verification evidence for this frontend story remains blocked and should be completed when browser tooling is provided.
+---
+## [2026-03-08 20:46:36 CST] - US-025
+- Implemented frontend settings page model in `src/frontend/settings_page.js`, covering datasource env switch/rollback actions, timezone + notify preference updates, notify-rule summary visibility, and datasource health/status projection.
+- Added datasource payload sanitization at page-model boundary so plaintext token fields are never forwarded, stored in view state, or rendered.
+- Added deterministic settings renderer and US-025 tests/shell runner, then integrated the module into quality gates (`scripts/typecheck.sh` export assertions + `package.json` test chain). `npm run check` passes.
+- Files changed: `src/frontend/settings_page.js`, `tests/us025_frontend_settings_health_test.js`, `tests/us025_frontend_settings_health_test.sh`, `scripts/typecheck.sh`, `package.json`, `scripts/ralph/prd.json`, `progress.txt`
+- **Learnings for future iterations:**
+  - Patterns discovered (e.g., "this codebase uses X for Y")
+  - Settings UI adapters should sanitize outbound config payloads with an allowlist to prevent accidental token leakage into logs/state.
+  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
+  - `config/service` rejects plaintext `token`/`apiToken`; if frontend passes these through unfiltered, env switch fails validation instead of progressing.
+  - Useful context (e.g., "the evaluation panel is in component X")
+  - The `dev-browser` skill remains unavailable in this session, so browser verification evidence is blocked and should be completed once browser tooling is provided.
+---
